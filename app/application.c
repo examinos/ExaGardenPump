@@ -1,50 +1,104 @@
 #include <application.h>
 
-// Find defailed API description at https://sdk.hardwario.com/
-
 // LED instance
 bc_led_t led;
 
 // Button instance
 bc_button_t button;
 
-// Button event callback
+#define MEASUREMENT_REPORT_INTERVAL (1 * 60 * 1000)
+
 void button_event_handler(bc_button_t *self, bc_button_event_t event, void *event_param)
 {
-    // Log button event
-    bc_log_info("APP: Button event: %i", event);
-
-    // Check event source
     if (event == BC_BUTTON_EVENT_PRESS)
     {
-        // Toggle LED pin state
-        bc_led_set_mode(&led, BC_LED_MODE_TOGGLE);
+        bc_led_pulse(&led, 100);
     }
 }
 
-// Application initialization function which is called once after boot
 void application_init(void)
 {
     // Initialize logging
     bc_log_init(BC_LOG_LEVEL_DUMP, BC_LOG_TIMESTAMP_ABS);
 
     // Initialize LED
-    bc_led_init(&led, BC_GPIO_LED, false, 0);
-    bc_led_set_mode(&led, BC_LED_MODE_ON);
+    bc_led_init(&led, BC_GPIO_LED, false, false);
+    bc_led_pulse(&led, 2000);
 
     // Initialize button
-    bc_button_init(&button, BC_GPIO_BUTTON, BC_GPIO_PULL_DOWN, 0);
+    bc_button_init(&button, BC_GPIO_BUTTON, BC_GPIO_PULL_DOWN, false);
     bc_button_set_event_handler(&button, button_event_handler, NULL);
+
+    bc_module_sensor_init();
+
+    bc_gpio_init(BC_GPIO_P4);
+    bc_gpio_set_mode(BC_GPIO_P4, BC_GPIO_MODE_INPUT);
+
+    bc_radio_init(BC_RADIO_MODE_NODE_SLEEPING);
+    bc_radio_pairing_request("ultrasound-distance", VERSION);
 }
 
-// Application task function (optional) which is called peridically if scheduled
 void application_task(void)
 {
-    static int counter;
+    bc_led_pulse(&led, 100);
+    
+    bc_module_sensor_set_vdd(true);
+    bc_system_pll_enable();
+    bc_tick_wait(300);
 
-    // Log task run and increment counter
-    bc_log_debug("APP: Task run (count: %d)", ++counter);
+    bc_tick_t timeout = bc_tick_get() + 5000;
 
-    // Plan next run of this task in 1000 ms
-    bc_scheduler_plan_current_from_now(1000);
+    // Wait while signal is low
+    while (bc_gpio_get_input(BC_GPIO_P4))
+    {
+        if (bc_tick_get() >= timeout)
+        {
+            timeout = 0;
+            break;
+        }
+    }
+
+    // Wait until signal is high - rising edge
+    while (!bc_gpio_get_input(BC_GPIO_P4))
+    {
+        if (bc_tick_get() >= timeout)
+        {
+            timeout = 0;
+            break;
+        }
+    }
+
+    bc_timer_start();
+
+    // Wait while signal is low
+    while (bc_gpio_get_input(BC_GPIO_P4))
+    {
+        if (bc_tick_get() >= timeout)
+        {
+            timeout = 0;
+            break;
+        }
+    }
+
+    uint32_t microseconds = bc_timer_get_microseconds();
+
+    bc_timer_stop();
+
+    float centimeters = microseconds / 58.0f;
+
+    bc_system_pll_disable();
+    bc_module_sensor_set_vdd(false);
+
+    bc_scheduler_plan_current_from_now(MEASUREMENT_REPORT_INTERVAL);
+
+    if (timeout == 0)
+    {
+        bc_log_error("APP: Sensor error");
+        bc_radio_pub_float("distance/-/centimeters", NULL);
+    }
+    else
+    {
+        bc_log_info("APP: Distance = %.1f cm", centimeters);
+        bc_radio_pub_float("distance/-/centimeters", &centimeters);
+    }
 }
